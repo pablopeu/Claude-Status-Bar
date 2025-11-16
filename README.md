@@ -57,7 +57,27 @@ brew install python3
 
 ## 🚀 Instalación rápida
 
-### Opción 1: Instalación automática (recomendada)
+### Opción 1: Instalador automático (⭐ MÁS FÁCIL)
+
+```bash
+# Clonar el repositorio e instalar en un solo paso
+git clone https://github.com/pablopeu/Claude-Status-Bar.git
+cd Claude-Status-Bar
+bash install.sh
+```
+
+El instalador hará todo automáticamente:
+- ✓ Verificar Python 3
+- ✓ Crear directorios necesarios
+- ✓ Copiar y configurar el script
+- ✓ Probar que funciona
+- ✓ Configurar Claude Code (con backup del settings.json existente)
+
+**¡Y listo!** Solo cierra y vuelve a abrir Claude Code.
+
+---
+
+### Opción 2: Descarga directa con curl
 
 ```bash
 # Descargar el script
@@ -72,9 +92,11 @@ chmod +x ~/.claude-code/scripts/usage_bar.py
 echo '{"current_tokens": 450000, "expected_total_tokens": 500000, "model": {"id": "claude-sonnet-4-5", "display_name": "Claude Sonnet 4.5"}}' | python3 ~/.claude-code/scripts/usage_bar.py
 ```
 
-Si ves la barra de progreso, ¡funciona! Continúa con la configuración de Claude Code.
+Si ves la barra de progreso, ¡funciona! Continúa con la [configuración manual](#%EF%B8%8F-configuración-de-claude-code).
 
-### Opción 2: Clonar el repositorio
+---
+
+### Opción 3: Instalación manual (paso a paso)
 
 ```bash
 git clone https://github.com/pablopeu/Claude-Status-Bar.git
@@ -83,6 +105,8 @@ mkdir -p ~/.claude-code/scripts
 cp usage_bar.py ~/.claude-code/scripts/
 chmod +x ~/.claude-code/scripts/usage_bar.py
 ```
+
+Luego continúa con la [configuración manual](#%EF%B8%8F-configuración-de-claude-code).
 
 ## ⚙️ Configuración de Claude Code
 
