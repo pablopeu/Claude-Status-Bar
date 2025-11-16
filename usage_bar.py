@@ -109,6 +109,15 @@ def claude_usage_bar():
 
         data = json.loads(input_data)
 
+        # DEBUG: Guardar datos recibidos para análisis
+        import os
+        debug_file = os.path.expanduser("~/.claude-code/statusbar-debug.json")
+        try:
+            with open(debug_file, 'w') as f:
+                json.dump(data, f, indent=2)
+        except:
+            pass
+
         # Extraer datos de la sesión
         current_tokens = data.get('current_tokens', 0)
         expected_total_tokens = data.get('expected_total_tokens', 0)
