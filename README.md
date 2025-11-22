@@ -6,25 +6,46 @@ Barra de estado personalizada para Claude Code que muestra el uso de contexto en
 
 ## 📊 Características
 
-- ⚡ **Barra de progreso visual**: Muestra el uso de contexto con caracteres Unicode
-- 📊 **Porcentaje de uso**: Indica el porcentaje del contexto utilizado
+- ⚡ **Barra de progreso visual con colores**: Muestra el uso de contexto con caracteres Unicode
+  - 🟢 **Verde** (0-50%): Uso normal
+  - 🟡 **Amarillo** (50-80%): Uso moderado
+  - 🔴 **Rojo** (80-100%): Uso alto
+- 📊 **Métricas detalladas**: Muestra tokens usados y límite total (ej: 45K/1.0M)
+- 💾 **Lectura directa de sesiones**: Lee tokens desde archivos JSONL locales de Claude
+- 📈 **Soporte para caché**: Calcula tokens de input, output, cache creation y cache read
 - ⏰ **Tiempo de reset**: Muestra cuándo se resetea el límite de la sesión
 - 📏 **Autosizeable**: Se ajusta automáticamente al ancho de la terminal
 - 🤖 **Detección automática del modelo**: Soporta Sonnet 4.5 (1M tokens) y otros modelos (200K tokens)
-- 🎯 **Detección del plan**: Muestra el plan de Claude Code si no hay datos de sesión disponibles
 - 🔄 **Actualización en tiempo real**: Se actualiza automáticamente con cada interacción
 - 🐍 **Solo Python estándar**: No requiere dependencias externas
 
 ## 🎨 Formato de salida
 
 ```
-[████████████░░░░░░░░] 45% Reset: Today 15:00
+[████████████░░░░░░░░] 4% (45K/1.0M) Reset: Today 15:00
 ```
 
 **Elementos:**
-- `[████████████░░░░░░░░]` → Barra de progreso visual (se ajusta al ancho de la terminal)
-- `45%` → Porcentaje del contexto utilizado
+- `[████████████░░░░░░░░]` → Barra de progreso visual con colores (se ajusta al ancho de la terminal)
+  - 🟢 Verde: Uso bajo (0-50%)
+  - 🟡 Amarillo: Uso moderado (50-80%)
+  - 🔴 Rojo: Uso alto (80-100%)
+- `4%` → Porcentaje del contexto utilizado (mismo color que la barra)
+- `(45K/1.0M)` → Tokens usados / Límite total (K=miles, M=millones)
 - `Reset: Today 15:00` → Próximo reset del límite de uso
+
+**Ejemplos de visualización:**
+
+```bash
+# Uso bajo (verde)
+[███░░░░░░░░░░░░░░░░] 15% (150K/1.0M) Reset: Today 20:00
+
+# Uso moderado (amarillo)
+[████████████░░░░░░░] 60% (600K/1.0M) Reset: Tmrw 00:00
+
+# Uso alto (rojo)
+[█████████████████░░] 85% (850K/1.0M) Reset: Today 15:00
+```
 
 ## 📋 Requisitos previos
 
@@ -207,7 +228,28 @@ Edita la función `create_progress_bar()`:
 def create_progress_bar(percentage, width):
     filled = int(percentage * width / 100)
     empty = width - filled
-    return "▰" * filled + "▱" * empty  # Cambia los caracteres aquí
+
+    # Obtener color según porcentaje
+    color = get_color_code(percentage)
+    reset = "\033[0m"
+
+    # Usar caracteres diferentes
+    return color + ("▰" * filled) + reset + ("▱" * empty)
+```
+
+### Ajustar umbrales de colores
+
+Edita la función `get_color_code()` para cambiar cuándo cambian los colores:
+
+```python
+def get_color_code(percentage):
+    """Personaliza los umbrales de color"""
+    if percentage >= 90:  # Rojo a partir del 90%
+        return "\033[91m"
+    elif percentage >= 70:  # Amarillo a partir del 70%
+        return "\033[93m"
+    else:
+        return "\033[92m"  # Verde por debajo del 70%
 ```
 
 ### Ajustar límites de contexto
@@ -224,15 +266,45 @@ def get_context_limit(model_info):
 
 ## 📖 Cómo funciona
 
-1. Claude Code pasa datos de la sesión actual como JSON via stdin
-2. El script lee el JSON y extrae:
-   - `current_tokens`: Tokens usados actualmente
-   - `expected_total_tokens`: Total esperado de tokens
-   - `model`: Información del modelo
-3. Calcula el porcentaje de uso según el límite del modelo
-4. Determina el próximo tiempo de reset (bloques de 5 horas)
-5. Crea una barra de progreso que se ajusta al ancho de la terminal
-6. Retorna una línea formateada que Claude Code muestra en el status bar
+1. **Claude Code pasa datos de la sesión** como JSON via stdin, incluyendo:
+   - `session_id`: ID único de la sesión actual
+   - `model`: Información del modelo (ID y nombre)
+   - Metadata de la sesión (workspace, version, etc.)
+
+2. **El script localiza el archivo JSONL** de la sesión en `~/.claude/projects/`
+   - Busca el archivo que coincide con el `session_id`
+   - Lee todas las líneas del transcript
+
+3. **Extrae tokens de cada mensaje** en el JSONL:
+   ```python
+   usage = {
+     "input_tokens": 1234,
+     "output_tokens": 5678,
+     "cache_creation_input_tokens": 910,
+     "cache_read_input_tokens": 1112
+   }
+   ```
+
+4. **Calcula el total de tokens**:
+   - Suma `input_tokens + output_tokens` de todos los mensajes
+   - Considera también tokens de caché (con costos diferentes)
+
+5. **Determina el límite según el modelo**:
+   - Sonnet 4.5: 1,000,000 tokens (1M)
+   - Otros modelos: 200,000 tokens (200K)
+
+6. **Calcula porcentaje y color**:
+   - Porcentaje: `(tokens_usados / límite) * 100`
+   - Color: Verde (0-50%), Amarillo (50-80%), Rojo (80-100%)
+
+7. **Determina el próximo reset** (bloques de 5 horas)
+
+8. **Genera la barra de progreso**:
+   - Se ajusta al ancho de la terminal
+   - Aplica colores ANSI según el nivel de uso
+   - Formatea tokens en K (miles) o M (millones)
+
+9. **Retorna la línea formateada** que Claude Code muestra en el status bar
 
 ## 🐛 Solución de problemas
 
@@ -371,9 +443,14 @@ Sí, si estás usando Claude Code en el navegador, el status bar también funcio
 No, el script usa solo la librería estándar de Python (json, sys, shutil, datetime).
 
 ### ¿Puedo cambiar los colores de la barra?
-Los caracteres Unicode (`█` y `░`) toman el color de tu terminal. Puedes personalizarlos editando la función `create_progress_bar()`:
+¡Sí! La barra ahora usa colores ANSI que cambian según el uso:
+- 🟢 Verde (0-50%): Uso normal
+- 🟡 Amarillo (50-80%): Advertencia de uso moderado
+- 🔴 Rojo (80-100%): Alerta de uso alto
+
+Puedes personalizar los umbrales editando `get_color_code()` en el script. También puedes cambiar los caracteres editando `create_progress_bar()`:
 ```python
-return "▰" * filled + "▱" * empty  # Caracteres alternativos
+return color + ("▰" * filled) + reset + ("▱" * empty)  # Caracteres alternativos
 ```
 
 ### ¿Cómo actualizo el script a una nueva versión?
