@@ -55,11 +55,24 @@ def get_plan_name(model_info):
 
     return "Free"
 
-def calculate_next_reset():
+def get_color_code(percentage):
     """
-    Calcula el próximo reset de Claude Code
+    Retorna código de color ANSI apagado según el porcentaje de uso
+    Verde oscuro (0-50%), Amarillo oscuro (50-80%), Rojo oscuro (80-100%)
+    """
+    if percentage >= 80:
+        return "\033[31m"  # Rojo oscuro
+    elif percentage >= 50:
+        return "\033[33m"  # Amarillo oscuro
+    else:
+        return "\033[32m"  # Verde oscuro
+
+def calculate_time_to_reset():
+    """
+    Calcula el tiempo hasta el próximo reset de Claude Code
     Los límites se resetean cada 5 horas en bloques:
     00:00-05:00, 05:00-10:00, 10:00-15:00, 15:00-20:00, 20:00-01:00 (siguiente día)
+    Retorna: tupla (horas, minutos)
     """
     now = datetime.now()
     current_hour = now.hour
@@ -83,47 +96,116 @@ def calculate_next_reset():
 
     next_reset = reset_day.replace(hour=reset_hour, minute=0, second=0, microsecond=0)
 
-    # Formato: "Sat 15:00" o "Today 15:00"
-    if next_reset.date() == now.date():
-        return f"Today {next_reset.strftime('%H:%M')}"
-    elif next_reset.date() == (now + timedelta(days=1)).date():
-        return f"Tmrw {next_reset.strftime('%H:%M')}"
-    else:
-        return next_reset.strftime("%a %H:%M")
+    # Calcular diferencia en horas y minutos
+    time_diff = next_reset - now
+    hours = time_diff.seconds // 3600
+    minutes = (time_diff.seconds % 3600) // 60
+
+    return hours, minutes
 
 def create_progress_bar(percentage, width):
-    """Crea la barra de progreso con caracteres Unicode"""
+    """Crea la barra de progreso con caracteres Unicode y colores apagados"""
     filled = int(percentage * width / 100)
     empty = width - filled
-    return "█" * filled + "░" * empty
+
+    # Obtener color según porcentaje
+    color = get_color_code(percentage)
+    reset = "\033[0m"
+
+    # Barra coloreada: caracteres llenos en color, caracteres vacíos sin color
+    return color + ("█" * filled) + reset + ("░" * empty)
+
+def get_weekly_usage_percentage(data):
+    """
+    Obtiene el porcentaje de uso semanal desde los datos de Claude Code
+    Si no está disponible, retorna None
+    """
+    try:
+        # Buscar información de uso semanal en diferentes campos del JSON
+        # Claude Code puede pasar estos datos en varios formatos
+
+        # Opción 1: Campo directo weekly_usage_percentage
+        if 'weekly_usage_percentage' in data:
+            return int(data['weekly_usage_percentage'])
+
+        # Opción 2: weekly_usage con used/limit
+        weekly_usage = data.get('weekly_usage', {})
+        if weekly_usage:
+            used = weekly_usage.get('used', 0)
+            limit = weekly_usage.get('limit', 0)
+            if limit > 0:
+                return int((used / limit) * 100)
+
+        # Opción 3: Calcular desde remaining percentage (si dice "87% left" = 13% usado)
+        weekly_remaining = data.get('weekly_remaining_percentage')
+        if weekly_remaining is not None:
+            return int(100 - weekly_remaining)
+
+        # Si no hay datos disponibles, retornar None
+        return None
+    except:
+        return None
 
 def get_token_usage_from_transcript(transcript_path):
     """
     Lee el transcript de la sesión actual y calcula el uso de tokens
+    El archivo es JSONL (JSON Lines): cada línea es un JSON separado
     """
     try:
         if not os.path.exists(transcript_path):
             return None, None
 
-        with open(transcript_path, 'r') as f:
-            transcript = json.load(f)
-
-        # Contar tokens de todos los mensajes
         total_input_tokens = 0
         total_output_tokens = 0
+        total_cache_creation = 0
+        total_cache_read = 0
 
-        for message in transcript.get('messages', []):
-            # Sumar tokens de input (user + context)
-            if 'inputTokens' in message:
-                total_input_tokens += message['inputTokens']
+        with open(transcript_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
 
-            # Sumar tokens de output (assistant)
-            if 'outputTokens' in message:
-                total_output_tokens += message['outputTokens']
+                try:
+                    entry = json.loads(line)
 
-        # El total usado es principalmente los input tokens (que incluyen el contexto)
-        return total_input_tokens, total_output_tokens
-    except:
+                    # Solo procesar mensajes de tipo "assistant"
+                    if entry.get('type') != 'assistant':
+                        continue
+
+                    # Extraer usage de message.usage
+                    message = entry.get('message', {})
+                    usage = message.get('usage', {})
+
+                    if not usage:
+                        continue
+
+                    # Sumar tokens de input (nuevos)
+                    total_input_tokens += usage.get('input_tokens', 0)
+
+                    # Sumar tokens de output
+                    total_output_tokens += usage.get('output_tokens', 0)
+
+                    # Sumar cache creation tokens
+                    total_cache_creation += usage.get('cache_creation_input_tokens', 0)
+
+                    # Sumar cache read tokens
+                    total_cache_read += usage.get('cache_read_input_tokens', 0)
+
+                except json.JSONDecodeError:
+                    # Ignorar líneas que no sean JSON válido
+                    continue
+
+        # El contexto total usado incluye:
+        # - input_tokens: tokens nuevos procesados
+        # - cache_creation: tokens usados para crear cache
+        # - cache_read: tokens leídos de cache (cuestan menos pero ocupan contexto)
+        # - output_tokens: tokens de respuesta
+        total_context_tokens = total_input_tokens + total_cache_creation + total_cache_read + total_output_tokens
+
+        return total_context_tokens, total_output_tokens
+    except Exception as e:
+        # En caso de error, retornar None
         return None, None
 
 def claude_usage_bar():
@@ -185,26 +267,40 @@ def claude_usage_bar():
         # Calcular porcentaje de uso
         percentage = min(int((usage_tokens / context_limit) * 100), 100)
 
+        # Obtener uso semanal
+        weekly_percentage = get_weekly_usage_percentage(data)
+
+        # Calcular tiempo hasta reset
+        hours, minutes = calculate_time_to_reset()
+
         # Calcular ancho dinámico de la terminal
         terminal_width = get_terminal_width()
         if terminal_width < 50:
             terminal_width = 50
 
-        # Preparar strings de información
-        perc_str = f"{percentage}%"
-        reset_str = f"Reset: {calculate_next_reset()}"
+        # Preparar strings de información con el nuevo formato compacto
+        # Formato: [████████████░░░░░░░░] 4% TTR:2H 30M Week:13%
+        color = get_color_code(percentage)
+        reset = "\033[0m"
+
+        perc_str = f"{color}{percentage}%{reset}"
+        ttr_str = f"TTR:{hours}H {minutes}M"
+        week_str = f"Week:{weekly_percentage}%" if weekly_percentage is not None else ""
 
         # Calcular ancho disponible para la barra
-        # Formato: "[bar] XX% Reset: Xxx XX:XX"
-        # Espacios: "[" + "]" + " " + perc_str + " " + reset_str = 4 + len(perc_str) + len(reset_str)
-        fixed_width = 4 + len(perc_str) + len(reset_str)
+        # Formato: "[bar] X% TTR:XH XM Week:X%"
+        # Nota: len() cuenta los códigos ANSI, así que usamos len sin colores
+        fixed_width = 4 + len(f"{percentage}%") + len(ttr_str) + (len(week_str) if week_str else 0)
         bar_width = max(terminal_width - fixed_width, 10)
 
-        # Crear barra de progreso
+        # Crear barra de progreso con colores
         progress_bar = create_progress_bar(percentage, bar_width)
 
-        # Retornar línea completa: [████░░] 75% Reset: Today 15:00
-        return f"[{progress_bar}] {perc_str} {reset_str}"
+        # Construir línea completa
+        if week_str:
+            return f"[{progress_bar}] {perc_str} {ttr_str} {week_str}"
+        else:
+            return f"[{progress_bar}] {perc_str} {ttr_str}"
 
     except Exception as e:
         # En caso de error, mostrar mensaje genérico
