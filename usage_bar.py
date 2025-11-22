@@ -8,9 +8,6 @@ import json
 import sys
 import shutil
 import os
-import re
-import subprocess
-from pathlib import Path
 from datetime import datetime, timedelta
 
 def get_terminal_width():
@@ -20,94 +17,10 @@ def get_terminal_width():
     except:
         return 80
 
-def get_web_usage_data():
-    """
-    Obtiene datos de uso directamente desde claude.ai/settings/usage
-    Retorna: (percentage, reset_time_str) o (None, None) si falla
-    """
-    cache_file = Path.home() / ".claude-code" / "usage-cache.json"
-    cache_duration = 60  # segundos
-
-    # Verificar cache
-    if cache_file.exists():
-        try:
-            cache_age = datetime.now().timestamp() - cache_file.stat().st_mtime
-            if cache_age < cache_duration:
-                with open(cache_file, 'r') as f:
-                    cache_data = json.load(f)
-                    return cache_data.get('percentage'), cache_data.get('reset_time')
-        except:
-            pass
-
-    # Leer credenciales
-    creds_file = Path.home() / ".claude" / ".credentials.json"
-    if not creds_file.exists():
-        return None, None
-
-    try:
-        with open(creds_file, 'r') as f:
-            creds = json.load(f)
-            token = creds.get('claudeAiOauth', {}).get('accessToken', '')
-
-        if not token:
-            return None, None
-
-        # Intentar obtener datos con curl
-        result = subprocess.run([
-            'curl', '-s', '-L',
-            'https://claude.ai/settings/usage',
-            '-H', f'Cookie: sessionKey={token}',
-            '-H', 'User-Agent: Mozilla/5.0'
-        ], capture_output=True, text=True, timeout=5)
-
-        html = result.stdout
-
-        # Parsear HTML para extraer porcentaje y reset time
-        # Buscar patrones como "69% used" y "Resets in 3 hr 27 min"
-        percentage_match = re.search(r'(\d+)%\s*used', html, re.IGNORECASE)
-        reset_match = re.search(r'Resets in (\d+)\s*hr\s*(\d+)\s*min', html, re.IGNORECASE)
-
-        if percentage_match:
-            percentage = int(percentage_match.group(1))
-
-            # Calcular reset time
-            reset_str = None
-            if reset_match:
-                hours = int(reset_match.group(1))
-                minutes = int(reset_match.group(2))
-                reset_time = datetime.now() + timedelta(hours=hours, minutes=minutes)
-
-                # Formato: "Today 17:00" o "Tmrw 02:00"
-                if reset_time.date() == datetime.now().date():
-                    reset_str = f"Today {reset_time.strftime('%H:%M')}"
-                elif reset_time.date() == (datetime.now() + timedelta(days=1)).date():
-                    reset_str = f"Tmrw {reset_time.strftime('%H:%M')}"
-                else:
-                    reset_str = reset_time.strftime("%a %H:%M")
-
-            # Guardar en cache
-            try:
-                cache_file.parent.mkdir(parents=True, exist_ok=True)
-                with open(cache_file, 'w') as f:
-                    json.dump({
-                        'percentage': percentage,
-                        'reset_time': reset_str,
-                        'timestamp': datetime.now().isoformat()
-                    }, f)
-            except:
-                pass
-
-            return percentage, reset_str
-
-    except Exception as e:
-        pass
-
-    return None, None
-
 def get_context_limit(model_info):
     """
     Determina el límite de contexto según el modelo
-    - Sonnet 4.5: 1.7M tokens (límite de sesión para Claude Pro)
+    - Sonnet 4.5: 1M tokens
     - Otros modelos: 200K tokens
     """
     if not model_info:
@@ -116,10 +29,9 @@ def get_context_limit(model_info):
     model_id = model_info.get('id', '').lower()
     model_name = model_info.get('display_name', '').lower()
 
-    # Detectar Sonnet 4.5 (1.7M session limit para Claude Pro)
-    # Nota: El context window es 1M, pero el límite de sesión es ~1.7M
+    # Detectar Sonnet 4.5 (1M context)
     if 'sonnet-4-5' in model_id or 'sonnet 4.5' in model_name or 'claude-sonnet-4-5' in model_id:
-        return 1_700_000
+        return 1_000_000
 
     # Por defecto 200K para otros modelos
     return 200_000
@@ -143,141 +55,76 @@ def get_plan_name(model_info):
 
     return "Free"
 
-def calculate_session_reset(session_id):
+def calculate_next_reset():
     """
-    Calcula el reset de la sesión basado en el primer mensaje + 5 horas
-    La sesión dura 5 horas desde el primer mensaje o hasta que se alcance el límite
+    Calcula el próximo reset de Claude Code
+    Los límites se resetean cada 5 horas en bloques:
+    00:00-05:00, 05:00-10:00, 10:00-15:00, 15:00-20:00, 20:00-01:00 (siguiente día)
     """
-    # Buscar el archivo JSONL de la sesión
-    possible_paths = [
-        Path.home() / ".claude" / "projects",
-        Path.home() / ".config" / "claude" / "projects"
-    ]
+    now = datetime.now()
+    current_hour = now.hour
 
-    for base_path in possible_paths:
-        if not base_path.exists():
-            continue
+    # Determinar el próximo bloque de 5 horas
+    if current_hour < 5:
+        reset_hour = 5
+        reset_day = now
+    elif current_hour < 10:
+        reset_hour = 10
+        reset_day = now
+    elif current_hour < 15:
+        reset_hour = 15
+        reset_day = now
+    elif current_hour < 20:
+        reset_hour = 20
+        reset_day = now
+    else:  # >= 20
+        reset_hour = 0
+        reset_day = now + timedelta(days=1)
 
-        for jsonl_file in base_path.rglob("*.jsonl"):
-            if session_id in jsonl_file.name:
-                try:
-                    # Leer líneas hasta encontrar el primer timestamp (inicio de sesión)
-                    with open(jsonl_file, 'r', encoding='utf-8') as f:
-                        for line in f:
-                            if not line.strip():
-                                continue
+    next_reset = reset_day.replace(hour=reset_hour, minute=0, second=0, microsecond=0)
 
-                            data = json.loads(line)
-
-                            # Buscar timestamp en diferentes ubicaciones
-                            timestamp = None
-                            if 'timestamp' in data:
-                                timestamp = data['timestamp']
-                            elif 'created_at' in data:
-                                timestamp = data['created_at']
-                            elif 'message' in data and 'timestamp' in data['message']:
-                                timestamp = data['message']['timestamp']
-
-                            if timestamp:
-                                # Parsear timestamp y calcular reset (inicio + 5 horas)
-                                try:
-                                    start_time = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
-                                    # Convertir a hora local si es necesario
-                                    if start_time.tzinfo:
-                                        start_time = start_time.astimezone()
-                                    reset_time = start_time + timedelta(hours=5)
-                                    return reset_time.strftime('%H:%M')
-                                except:
-                                    pass
-                                # Salir después de encontrar el primer timestamp válido
-                                break
-                except:
-                    pass
-
-    # Fallback: si no se encuentra, retornar hora desconocida
-    return "--:--"
-
-def get_session_tokens(session_id):
-    """
-    Lee el archivo JSONL de la sesión y calcula los tokens totales
-    Retorna: (input_tokens, output_tokens, cache_creation, cache_read)
-    """
-    # Buscar en las posibles ubicaciones de Claude
-    possible_paths = [
-        Path.home() / ".claude" / "projects",
-        Path.home() / ".config" / "claude" / "projects"
-    ]
-
-    for base_path in possible_paths:
-        if not base_path.exists():
-            continue
-
-        # Buscar el archivo JSONL de esta sesión
-        for jsonl_file in base_path.rglob("*.jsonl"):
-            if session_id in jsonl_file.name:
-                return parse_jsonl_tokens(jsonl_file)
-
-    return 0, 0, 0, 0
-
-def parse_jsonl_tokens(jsonl_path):
-    """
-    Parsea un archivo JSONL y suma todos los tokens
-    """
-    total_input = 0
-    total_output = 0
-    total_cache_creation = 0
-    total_cache_read = 0
-
-    try:
-        with open(jsonl_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                if not line.strip():
-                    continue
-
-                data = json.loads(line)
-
-                # Extraer usage de diferentes ubicaciones posibles
-                usage = data.get('usage', {})
-                if not usage and 'message' in data:
-                    usage = data['message'].get('usage', {})
-
-                total_input += usage.get('input_tokens', 0)
-                total_output += usage.get('output_tokens', 0)
-                total_cache_creation += usage.get('cache_creation_input_tokens', 0)
-                total_cache_read += usage.get('cache_read_input_tokens', 0)
-
-    except Exception as e:
-        # Si hay error leyendo el archivo, retornar ceros
-        pass
-
-    return total_input, total_output, total_cache_creation, total_cache_read
-
-def get_color_code(percentage):
-    """
-    Retorna código de color ANSI según el porcentaje de uso
-    Verde: 0-50%, Amarillo: 50-80%, Rojo: 80-100%
-    """
-    if percentage >= 80:
-        return "\033[31m"  # Rojo (menos brillante para fondo negro)
-    elif percentage >= 50:
-        return "\033[33m"  # Amarillo (menos brillante para fondo negro)
+    # Formato: "Sat 15:00" o "Today 15:00"
+    if next_reset.date() == now.date():
+        return f"Today {next_reset.strftime('%H:%M')}"
+    elif next_reset.date() == (now + timedelta(days=1)).date():
+        return f"Tmrw {next_reset.strftime('%H:%M')}"
     else:
-        return "\033[32m"  # Verde (menos brillante para fondo negro)
+        return next_reset.strftime("%a %H:%M")
 
 def create_progress_bar(percentage, width):
-    """Crea la barra de progreso con caracteres Unicode y colores"""
+    """Crea la barra de progreso con caracteres Unicode"""
     filled = int(percentage * width / 100)
     empty = width - filled
+    return "█" * filled + "░" * empty
 
-    # Código de color según el porcentaje
-    color = get_color_code(percentage)
-    reset = "\033[0m"  # Reset color
+def get_token_usage_from_transcript(transcript_path):
+    """
+    Lee el transcript de la sesión actual y calcula el uso de tokens
+    """
+    try:
+        if not os.path.exists(transcript_path):
+            return None, None
 
-    # Crear barra con color usando caracteres muy tenues
-    # ░ (light shade) para relleno - muy sutil y tenue
-    # ▁ (lower eighth block) para vacío
-    bar = color + ("░" * filled) + reset + ("▁" * empty)
-    return bar
+        with open(transcript_path, 'r') as f:
+            transcript = json.load(f)
+
+        # Contar tokens de todos los mensajes
+        total_input_tokens = 0
+        total_output_tokens = 0
+
+        for message in transcript.get('messages', []):
+            # Sumar tokens de input (user + context)
+            if 'inputTokens' in message:
+                total_input_tokens += message['inputTokens']
+
+            # Sumar tokens de output (assistant)
+            if 'outputTokens' in message:
+                total_output_tokens += message['outputTokens']
+
+        # El total usado es principalmente los input tokens (que incluyen el contexto)
+        return total_input_tokens, total_output_tokens
+    except:
+        return None, None
 
 def claude_usage_bar():
     """
@@ -300,37 +147,43 @@ def claude_usage_bar():
         except:
             pass
 
-        # Extraer información de la sesión
-        session_id = data.get('session_id', '')
+        # Extraer información del modelo
         model_info = data.get('model', {})
 
-        # PRIORIDAD 1: Intentar obtener datos reales desde claude.ai
-        web_percentage, web_reset_time = get_web_usage_data()
+        # Determinar límite de contexto según el modelo
+        context_limit = get_context_limit(model_info)
 
-        if web_percentage is not None:
-            # Usar datos de la web (más precisos)
-            percentage = web_percentage
-            reset_time = web_reset_time if web_reset_time else calculate_session_reset(session_id)
-        else:
-            # FALLBACK: Calcular localmente si no hay datos de la web
-            context_limit = get_context_limit(model_info)
+        # Intentar obtener tokens de varias fuentes
+        usage_tokens = 0
 
-            # Leer tokens del archivo JSONL de la sesión
-            input_tokens, output_tokens, cache_creation, cache_read = get_session_tokens(session_id)
+        # Método 1: Campos directos en data
+        current_tokens = data.get('current_tokens', 0)
+        expected_total_tokens = data.get('expected_total_tokens', 0)
+        input_tokens = data.get('inputTokens', 0)
 
-            # Calcular total de tokens
-            usage_tokens = input_tokens + output_tokens + cache_creation
+        # Método 2: Leer desde el transcript
+        transcript_path = data.get('transcript_path', '')
+        if transcript_path:
+            input_tok, output_tok = get_token_usage_from_transcript(transcript_path)
+            if input_tok:
+                usage_tokens = input_tok
 
-            # Si no hay datos de tokens, mostrar mensaje básico
-            if usage_tokens == 0:
-                plan = get_plan_name(model_info)
-                return f"Claude Code ({plan})"
+        # Método 3: Usar campos directos si están disponibles
+        if not usage_tokens:
+            if current_tokens > 0:
+                usage_tokens = current_tokens
+            elif expected_total_tokens > 0:
+                usage_tokens = expected_total_tokens
+            elif input_tokens > 0:
+                usage_tokens = input_tokens
 
-            # Calcular porcentaje de uso
-            percentage = min(int((usage_tokens / context_limit) * 100), 100)
+        # Si no hay datos de tokens, mostrar plan por defecto
+        if usage_tokens == 0:
+            plan = get_plan_name(model_info)
+            return f"Claude Code ({plan})"
 
-        # Calcular reset time desde el primer mensaje de la sesión
-        reset_time = calculate_session_reset(session_id)
+        # Calcular porcentaje de uso
+        percentage = min(int((usage_tokens / context_limit) * 100), 100)
 
         # Calcular ancho dinámico de la terminal
         terminal_width = get_terminal_width()
@@ -338,23 +191,20 @@ def claude_usage_bar():
             terminal_width = 50
 
         # Preparar strings de información
-        color = get_color_code(percentage)
-        reset_color = "\033[0m"
-
-        perc_str = f"{color}{percentage}%{reset_color}"
-        reset_display = f"Resets: {reset_time}"
+        perc_str = f"{percentage}%"
+        reset_str = f"Reset: {calculate_next_reset()}"
 
         # Calcular ancho disponible para la barra
-        # Formato simplificado: "[bar] XX% Resets: HH:MM"
-        # Nota: Los códigos de color no cuentan para el ancho visual
-        fixed_width = 4 + len(f"{percentage}%") + 1 + len(reset_display)
+        # Formato: "[bar] XX% Reset: Xxx XX:XX"
+        # Espacios: "[" + "]" + " " + perc_str + " " + reset_str = 4 + len(perc_str) + len(reset_str)
+        fixed_width = 4 + len(perc_str) + len(reset_str)
         bar_width = max(terminal_width - fixed_width, 10)
 
         # Crear barra de progreso
         progress_bar = create_progress_bar(percentage, bar_width)
 
-        # Retornar línea completa: [░░░░░▁▁▁] 77% Resets: 18:00
-        return f"[{progress_bar}] {perc_str} {reset_display}"
+        # Retornar línea completa: [████░░] 75% Reset: Today 15:00
+        return f"[{progress_bar}] {perc_str} {reset_str}"
 
     except Exception as e:
         # En caso de error, mostrar mensaje genérico
